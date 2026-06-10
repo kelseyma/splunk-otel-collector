@@ -40,6 +40,8 @@ Description:
 
 OPTIONS:
     --otelcol PATH                    Absolute path to the otelcol exe.
+    --launcher PATH                   Absolute path to the launcher exe.
+    --opampsupervisor PATH            Absolute path to the opampsupervisor exe.
     --agent-config PATH               Absolute path to the agent config.
                                       Defaults to '$AGENT_CONFIG'.
     --gateway-config PATH             Absolute path to the gateway config.
@@ -55,11 +57,16 @@ OPTIONS:
     --output DIR                      Directory to save the MSI.
                                       Defaults to '$OUTPUT_DIR'.
     --skip-build-dir-removal          Skip removing the build directory before building the MSI.
+
+Environment:
+    WITH_OPAMP_SUPERVISOR=true        Include the launcher and OpAMP Supervisor binaries.
 EOH
 }
 
 parse_args_and_build() {
     local otelcol=""
+    local launcher=""
+    local opampsupervisor=""
     local agent_config="$AGENT_CONFIG"
     local gateway_config="$GATEWAY_CONFIG"
     local support_bundle="$SUPPORT_BUNDLE_SCRIPT"
@@ -69,6 +76,7 @@ parse_args_and_build() {
     local version=
     local skip_build_dir_removal=
     local arch="${ARCH:-amd64}"
+    local with_opamp_supervisor="${WITH_OPAMP_SUPERVISOR:-false}"
 
     while [ -n "${1-}" ]; do
         case $1 in
@@ -78,6 +86,14 @@ parse_args_and_build() {
                 ;;
             --otelcol)
                 otelcol="$2"
+                shift 1
+                ;;
+            --launcher)
+                launcher="$2"
+                shift 1
+                ;;
+            --opampsupervisor)
+                opampsupervisor="$2"
                 shift 1
                 ;;
             --agent-config)
@@ -132,6 +148,14 @@ parse_args_and_build() {
     fi
 
     set -x
+    case "$with_opamp_supervisor" in
+        true|false)
+            ;;
+        *)
+            echo "Invalid WITH_OPAMP_SUPERVISOR value '$with_opamp_supervisor'. Expected true or false." >&2
+            exit 1
+            ;;
+    esac
     case "$arch" in
         amd64|arm64)
             ;;
@@ -143,6 +167,14 @@ parse_args_and_build() {
     msiarch="$arch"
     if [[ -z "$otelcol" ]]; then
         otelcol="${REPO_DIR}/bin/otelcol_windows_${msiarch}.exe"
+    fi
+    if [[ "$with_opamp_supervisor" = "true" ]]; then
+        if [[ -z "$launcher" ]]; then
+            launcher="${REPO_DIR}/bin/splunk-otel-collector-launcher_windows_${msiarch}.exe"
+        fi
+        if [[ -z "$opampsupervisor" ]]; then
+            opampsupervisor="${REPO_DIR}/bin/opampsupervisor_windows_${msiarch}.exe"
+        fi
     fi
 
     build_dir="${WORK_DIR}/build"
@@ -175,14 +207,24 @@ parse_args_and_build() {
         wixarch="arm64"
     fi
 
-    dotnet wix build "${WXS_PATH}" \
-        -arch "${wixarch}" \
-        -out "${build_dir}/${msi_name}" \
-        -bindpath "${files_dir}" \
-        -d Version="${version}" \
-        -d Otelcol="${otelcol}" \
-        -d JmxMetricsJar="${jmx_metrics_jar}" \
+    wix_args=(
+        dotnet wix build "${WXS_PATH}"
+        -arch "${wixarch}"
+        -out "${build_dir}/${msi_name}"
+        -bindpath "${files_dir}"
+        -d Version="${version}"
+        -d Otelcol="${otelcol}"
+        -d WithOpAMPSupervisor="${with_opamp_supervisor}"
+        -d JmxMetricsJar="${jmx_metrics_jar}"
         -d FilesDir="${files_dir}"
+    )
+    if [[ "$with_opamp_supervisor" = "true" ]]; then
+        wix_args+=(
+            -d Launcher="${launcher}"
+            -d OpAMPSupervisor="${opampsupervisor}"
+        )
+    fi
+    "${wix_args[@]}"
 
     msi="${build_dir}/${msi_name}"
 

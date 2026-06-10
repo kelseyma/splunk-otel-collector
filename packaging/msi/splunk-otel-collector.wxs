@@ -44,6 +44,9 @@
       <Property Id="SPLUNK_API_URL" Secure="yes" />
       <Property Id="SPLUNK_INGEST_URL" Secure="yes" />
       <Property Id="SPLUNK_HEC_URL" Secure="yes" />
+      <?if $(var.WithOpAMPSupervisor) = true ?>
+      <Property Id="SPLUNK_OPAMP_SUPERVISOR_ENABLED" Value="false" Secure="yes" />
+      <?endif?>
       <CustomAction Id="Set_SPLUNK_CONFIG" Property="SPLUNK_CONFIG" Value="[CommonAppDataFolder]Splunk\OpenTelemetry Collector\[SPLUNK_SETUP_COLLECTOR_MODE]_config.yaml" />
       <CustomAction Id="Set_SPLUNK_API_URL" Property="SPLUNK_API_URL" Value="https://api.[SPLUNK_REALM].observability.splunkcloud.com" />
       <CustomAction Id="Set_SPLUNK_INGEST_URL" Property="SPLUNK_INGEST_URL" Value="https://ingest.[SPLUNK_REALM].observability.splunkcloud.com" />
@@ -78,6 +81,9 @@
                <MultiStringValue Value="SPLUNK_HEC_TOKEN=[SPLUNK_HEC_TOKEN]" />
                <MultiStringValue Value="SPLUNK_HEC_URL=[SPLUNK_HEC_URL]" />
                <MultiStringValue Value="SPLUNK_INGEST_URL=[SPLUNK_INGEST_URL]" />
+               <?if $(var.WithOpAMPSupervisor) = true ?>
+               <MultiStringValue Value="SPLUNK_OPAMP_SUPERVISOR_ENABLED=[SPLUNK_OPAMP_SUPERVISOR_ENABLED]" />
+               <?endif?>
                <MultiStringValue Value="SPLUNK_REALM=[SPLUNK_REALM]" />
             </RegistryValue>
          </RegistryKey>
@@ -115,7 +121,13 @@
          <Directory Id="COMPANYDIR" Name="Splunk">
             <Directory Id="INSTALLDIR" Name="OpenTelemetry Collector">
                <Component Id="ApplicationComponent" Guid="484fa99a-2efe-41cd-a047-98bc1fc71e04">
+                  <?if $(var.WithOpAMPSupervisor) = true ?>
+                  <File Id="LauncherExecutableFile" Name="splunk-otel-collector-launcher.exe" KeyPath="yes" Source="$(var.Launcher)" />
+                  <File Id="OtelcolExecutableFile" Name="otelcol.exe" Source="$(var.Otelcol)" />
+                  <File Id="OpAMPSupervisorExecutableFile" Name="opampsupervisor.exe" Source="$(var.OpAMPSupervisor)" />
+                  <?else?>
                   <File Id="OtelcolExecutableFile" Name="otelcol.exe" KeyPath="yes" Source="$(var.Otelcol)" />
+                  <?endif?>
                   <ServiceInstall
                         Id="Service"
                         Name="splunk-otel-collector"
