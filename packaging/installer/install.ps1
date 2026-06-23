@@ -183,6 +183,7 @@ try {
 $old_config_path = "$program_data_path\config.yaml"
 $agent_config_path = "$program_data_path\agent_config.yaml"
 $gateway_config_path = "$program_data_path\gateway_config.yaml"
+$supervisor_data_path = "$program_data_path\supervisor"
 
 try {
     Resolve-Path $env:TEMP 2>&1>$null
@@ -595,6 +596,9 @@ install_msi -path "$msi_path"
 
 # copy the default configs to $program_data_path
 mkdir "$program_data_path" -ErrorAction Ignore
+if ($with_supervisor) {
+    mkdir "$supervisor_data_path" -ErrorAction Ignore
+}
 if (!(Test-Path -Path "$agent_config_path") -And (Test-Path -Path "$installation_path\agent_config.yaml")) {
     echo "$agent_config_path not found"
     echo "Copying default agent_config.yaml to $agent_config_path"

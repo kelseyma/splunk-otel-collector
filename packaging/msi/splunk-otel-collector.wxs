@@ -64,7 +64,12 @@
          <Custom Action="AddOptionalConfigurationsCustomActionData" Before="AddOptionalConfigurations" />
          <Custom Action="AddOptionalConfigurations" After="WriteRegistryValues" />
          <Custom Action="CopyConfig" After="InstallFiles" Condition="NOT CONFIG_FILE_EXISTS AND NOT Installed" />
+         <?if $(var.WithOpAMPSupervisor) = true ?>
+         <Custom Action="CreateSupervisorDataDir" After="CopyConfig" Condition="NOT REMOVE" />
+         <Custom Action="DeleteProgramFilesConfig" After="CreateSupervisorDataDir" />
+         <?else?>
          <Custom Action="DeleteProgramFilesConfig" After="CopyConfig" />
+         <?endif?>
       </InstallExecuteSequence>
 
       <MajorUpgrade DowngradeErrorMessage="A later version of the Splunk OpenTelemetry Collector is already installed. Setup will now exit." />
@@ -111,6 +116,9 @@
 
       <!-- Copy the default agent config file to ProgramData if it does not already exist -->
       <CustomAction Id="CopyConfig" ExeCommand="xcopy /y &quot;[INSTALLDIR]*_config.yaml&quot; &quot;[CommonAppDataFolder]Splunk\OpenTelemetry Collector\&quot;" Directory="INSTALLDIR" Impersonate="no" Execute="deferred" Return="check" />
+      <?if $(var.WithOpAMPSupervisor) = true ?>
+      <CustomAction Id="CreateSupervisorDataDir" ExeCommand="cmd /c if not exist &quot;[CommonAppDataFolder]Splunk\OpenTelemetry Collector\supervisor&quot; mkdir &quot;[CommonAppDataFolder]Splunk\OpenTelemetry Collector\supervisor&quot;" Directory="INSTALLDIR" Impersonate="no" Execute="deferred" Return="ignore" />
+      <?endif?>
       <CustomAction Id="DeleteProgramFilesConfig" ExeCommand="cmd /c del /q &quot;[INSTALLDIR]*config.yaml&quot;" Directory="INSTALLDIR" Impersonate="no" Execute="deferred" Return="ignore" />
 
       <ComponentGroup Id="AssortedFiles">
