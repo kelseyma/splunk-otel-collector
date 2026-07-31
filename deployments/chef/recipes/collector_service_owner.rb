@@ -23,6 +23,13 @@ directory '/etc/otel/collector' do
   action :create
 end
 
+directory '/var/lib/otelcol' do
+  owner node['splunk_otel_collector']['user']
+  group node['splunk_otel_collector']['group']
+  mode '0755'
+  action :create
+end
+
 execute 'systemctl daemon-reload' do
   notifies :restart, 'service[splunk-otel-collector]', :delayed
   action :nothing

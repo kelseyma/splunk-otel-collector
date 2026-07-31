@@ -63,6 +63,7 @@ agent_config_path="${collector_config_dir}/agent_config.yaml"
 gateway_config_path="${collector_config_dir}/gateway_config.yaml"
 logs_config_path="${collector_config_dir}/splunk_logs_config_linux.yaml"
 logs_file_storage_path="/var/lib/otelcol/filelogs"
+state_dir="/var/lib/otelcol"
 metrics_config_path="${collector_config_dir}/splunk_metrics_config_linux.yaml"
 old_config_path="${collector_config_dir}/splunk_config_linux.yaml"
 collector_env_path="${collector_config_dir}/splunk-otel-collector.conf"
@@ -1119,6 +1120,8 @@ Collector:
                                         Specify this option to skip this step and use a pre-configured repo on the
                                         target system that provides the 'splunk-otel-collector' deb/rpm package.
   --test                                Use the test package repo instead of the primary.
+  --with-supervisor                     Enable OpAMP Supervisor mode for the collector service.
+                                        (default: false)
 
 Splunk Platform:
   --splunk-platform-token <token>       Set the HEC token for sending data to Splunk Platform.
@@ -1429,6 +1432,7 @@ parse_args_and_install() {
   local node_package_installed="false"
   local with_sdks=""
   local without_sdks=""
+  local with_supervisor="false"
 
   while [ -n "${1-}" ]; do
     case $1 in
@@ -1563,6 +1567,9 @@ parse_args_and_install() {
           fi
         done
         shift 1
+        ;;
+      --with-supervisor)
+        with_supervisor="true"
         ;;
       --npm-path)
         npm_path="$2"
@@ -1959,6 +1966,12 @@ parse_args_and_install() {
   fi
   configure_env_file "GODEBUG" "$godebug" "$collector_env_path"
   configure_env_file "SPLUNK_MEMORY_TOTAL_MIB" "$memory" "$collector_env_path"
+  if [ "$with_supervisor" = "true" ]; then
+    configure_env_file "SPLUNK_OPAMP_SUPERVISOR_ENABLED" "true" "$collector_env_path"
+  fi
+
+  mkdir -p "$state_dir"
+  chown -R "$service_user:$service_group" "$state_dir"
 
   local otelcol_options=
   if [ "$discovery" = "true" ]; then

@@ -19,6 +19,21 @@ Ensure /etc/otel/collector is owned by the service user/group:
       - user: splunk_service_user
       - group: splunk_service_group
 
+Ensure /var/lib/otelcol is owned by the service user/group:
+  file.directory:
+    - name: /var/lib/otelcol
+    - user: {{ splunk_service_user }}
+    - group: {{ splunk_service_group }}
+    - recurse:
+      - user
+      - group
+    - require:
+      - pkg: splunk-otel-collector
+    - watch:
+      - pkg: splunk-otel-collector
+      - user: splunk_service_user
+      - group: splunk_service_group
+
 Restart Splunk Otel Collector service:
   service.running:
     - name: splunk-otel-collector

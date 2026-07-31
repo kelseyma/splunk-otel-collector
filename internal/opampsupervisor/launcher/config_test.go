@@ -169,6 +169,7 @@ service:
 	var runtimeConfig SupervisorConfig
 	readYAML(t, paths.RuntimeSupervisorConfig, &runtimeConfig)
 	runtimeYAML := readFile(t, paths.RuntimeSupervisorConfig)
+	assert.True(t, bytes.HasPrefix([]byte(runtimeYAML), []byte(runtimeSupervisorConfigHeader)))
 
 	assert.Equal(t, "https://custom.example/v1/opamp", supervisorConfig.Server.Endpoint)
 	assert.Equal(t, map[string]any{"X-SF-Token": "${SPLUNK_ACCESS_TOKEN}"}, supervisorConfig.Server.Headers)
@@ -1038,7 +1039,7 @@ func TestWriteYAMLErrors(t *testing.T) {
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			path, value := tt.setup(t, t.TempDir())
-			err := writeYAML(path, value)
+			err := writeYAML(path, value, "")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})

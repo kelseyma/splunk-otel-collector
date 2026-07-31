@@ -79,6 +79,32 @@
       register: config
       failed_when: config is changed
 
+    - name: Assert OpAMP Supervisor is enabled through additional env vars
+      ansible.builtin.lineinfile:
+        line: SPLUNK_OPAMP_SUPERVISOR_ENABLED=true
+        dest: /etc/otel/collector/splunk-otel-collector.conf
+        state: present
+      check_mode: yes
+      register: config
+      failed_when: config is changed
+
+    - name: Check OpAMP Supervisor process
+      ansible.builtin.command: pgrep -u custom-user -x opampsupervisor
+      changed_when: false
+
+    - name: Check OpAMP Supervisor state
+      ansible.builtin.stat:
+        path: /var/lib/otelcol/supervisor
+      register: opamp_supervisor_state
+
+    - name: Assert OpAMP Supervisor state is created
+      ansible.builtin.assert:
+        that:
+          - opamp_supervisor_state.stat.isdir
+          - opamp_supervisor_state.stat.pw_name == 'custom-user'
+          - opamp_supervisor_state.stat.gr_name == 'custom-group'
+          - opamp_supervisor_state.stat.mode == '0700'
+
     - name: Populate package facts
       ansible.builtin.package_facts:
 

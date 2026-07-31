@@ -41,9 +41,12 @@ const (
 	serviceName       = "splunk-otel-collector"
 	serviceOwner      = "splunk-otel-collector"
 	serviceProcess    = "otelcol"
+	supervisorProcess = "opampsupervisor"
 	envPath           = "/etc/otel/collector/splunk-otel-collector.conf"
 	agentConfigPath   = "/etc/otel/collector/agent_config.yaml"
 	gatewayConfigPath = "/etc/otel/collector/gateway_config.yaml"
+	statePath         = "/var/lib/otelcol"
+	supervisorState   = statePath + "/supervisor"
 )
 
 func TestTarCollectorPackageInstall(t *testing.T) {
@@ -61,9 +64,75 @@ func TestTarCollectorPackageInstall(t *testing.T) {
 
 				bundleDir := "/tmp/splunk-otel-collector"
 				assertExec(t, container, time.Minute, "test -d "+bundleDir+"/bin")
-				assertExec(t, container, time.Minute, "test -f "+bundleDir+"/bin/otelcol")
+				for _, binary := range []string{"otelcol", "otelcollauncher", "opampsupervisor"} {
+					binaryPath := bundleDir + "/bin/" + binary
+					assertExec(t, container, time.Minute, "test -x "+binaryPath)
+					require.Equal(t, "root:root:755", strings.TrimSpace(assertExec(
+						t, container, time.Minute, "stat -c '%U:%G:%a' "+binaryPath,
+					)))
+				}
 				assertExec(t, container, time.Minute, "test -f "+bundleDir+"/config/agent_config.yaml")
 				assertExec(t, container, time.Minute, "test -f "+bundleDir+"/config/gateway_config.yaml")
+				assertExec(t, container, time.Minute, "test ! -e "+statePath)
+				assertExec(t, container, 5*time.Minute, "dnf install -y libcap")
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"setcap CAP_DAC_READ_SEARCH=+eip "+bundleDir+"/bin/otelcollauncher",
+				)
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"setcap CAP_DAC_READ_SEARCH=+eip "+bundleDir+"/bin/opampsupervisor",
+				)
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"setcap CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH=+eip "+bundleDir+"/bin/otelcol",
+				)
+				assertExec(t, container, time.Minute, bundleDir+"/bin/otelcollauncher --version")
+				assertExec(t, container, time.Minute, bundleDir+"/bin/opampsupervisor --help")
+				assertExec(t, container, time.Minute, "install -d -m 0755 "+statePath)
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"set +e; timeout 15 env SPLUNK_OPAMP_SUPERVISOR_ENABLED=true"+
+						" SPLUNK_ACCESS_TOKEN=test SPLUNK_API_URL=https://api.test.invalid"+
+						" SPLUNK_INGEST_URL=https://ingest.test.invalid"+
+						" SPLUNK_HEC_URL=https://hec.test.invalid SPLUNK_HEC_TOKEN=test"+
+						" SPLUNK_MEMORY_TOTAL_MIB=512"+
+						" "+bundleDir+"/bin/otelcollauncher --config "+bundleDir+"/config/agent_config.yaml"+
+						"; test $? -eq 124",
+				)
+				assertExec(t, container, time.Minute, "test -f "+bundleDir+"/config/supervisor/supervisor_config.yaml")
+				require.Equal(t, "root:root:700", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+supervisorState,
+				)))
+				assertExec(t, container, time.Minute, "touch "+supervisorState+"/retained-state")
+				assertExec(t, container, time.Minute, "tar xzf /test/"+filepath.Base(pkgPath)+" -C /tmp")
+				assertExec(t, container, time.Minute, "test -f "+supervisorState+"/retained-state")
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"setcap CAP_DAC_READ_SEARCH=+eip "+bundleDir+"/bin/otelcollauncher",
+				)
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"setcap CAP_DAC_READ_SEARCH=+eip "+bundleDir+"/bin/opampsupervisor",
+				)
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"setcap CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH=+eip "+bundleDir+"/bin/otelcol",
+				)
 			})
 		}
 	}
@@ -82,10 +151,30 @@ func TestCollectorPackageInstall(t *testing.T) {
 
 				installLibcap(t, container, packageType)
 				copyFileToContainer(t, container, pkgPath)
+				if packageType == "deb" {
+					assertExec(
+						t,
+						container,
+						time.Minute,
+						"dpkg-deb -f /test/"+filepath.Base(pkgPath)+" Depends | grep -Fw libcap2-bin",
+					)
+				}
 				installPackage(t, container, packageType, "/test/"+filepath.Base(pkgPath))
 
 				assertExec(t, container, time.Minute, "test -f "+agentConfigPath)
 				assertExec(t, container, time.Minute, "test -f "+gatewayConfigPath)
+				assertExec(
+					t,
+					container,
+					time.Minute,
+					"grep -Fx 'ExecStart=/usr/bin/otelcollauncher $OTELCOL_OPTIONS' /lib/systemd/system/"+
+						serviceName+".service",
+				)
+				assertPackagedBinariesAndCapabilities(t, container)
+				require.Equal(t, serviceOwner+":"+serviceOwner, strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G' "+statePath,
+				)))
+				assertExec(t, container, time.Minute, "test ! -e "+supervisorState)
 
 				time.Sleep(5 * time.Second)
 				require.False(t, serviceIsRunning(t, container), "service should not be running after package install without config")
@@ -96,14 +185,43 @@ func TestCollectorPackageInstall(t *testing.T) {
 					return serviceIsRunning(t, container)
 				}, 10*time.Second, time.Second)
 
-				assertExec(t, container, time.Minute, "systemctl restart "+serviceName)
+				assertExec(t, container, time.Minute, "pkill -KILL -u "+serviceOwner+" -x "+serviceProcess)
 				require.Eventually(t, func() bool {
 					return serviceIsRunning(t, container)
+				}, 20*time.Second, time.Second)
+
+				assertExec(t, container, time.Minute, "chown root:root "+agentConfigPath)
+				assertExec(t, container, time.Minute, "chmod 600 "+agentConfigPath)
+				assertExec(t, container, time.Minute, "sed -i '$aSPLUNK_OPAMP_SUPERVISOR_ENABLED=true' "+envPath)
+				assertExec(t, container, time.Minute, "systemctl restart "+serviceName)
+				require.Eventually(t, func() bool {
+					return serviceIsRunningWithProcess(t, container, serviceOwner, supervisorProcess) &&
+						serviceIsRunning(t, container)
 				}, 10*time.Second, time.Second)
+				require.Equal(t, serviceOwner+":"+serviceOwner+":700", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+supervisorState,
+				)))
+				require.Equal(t, serviceOwner+":"+serviceOwner+":700", strings.TrimSpace(assertExec(
+					t,
+					container,
+					time.Minute,
+					"stat -c '%U:%G:%a' /etc/otel/collector/supervisor",
+				)))
+				assertExec(t, container, time.Minute, "touch "+supervisorState+"/retained-state")
+				assertExec(t, container, time.Minute, "pkill -KILL -u "+serviceOwner+" -x "+supervisorProcess)
+				require.Eventually(t, func() bool {
+					return serviceIsRunningWithProcess(t, container, serviceOwner, supervisorProcess) &&
+						serviceIsRunning(t, container)
+				}, 20*time.Second, time.Second)
 
 				assertExec(t, container, time.Minute, "systemctl stop "+serviceName)
 				time.Sleep(5 * time.Second)
 				require.False(t, serviceIsRunning(t, container), "service should stop cleanly")
+				require.False(
+					t,
+					serviceIsRunningWithProcess(t, container, serviceOwner, supervisorProcess),
+					"supervisor should stop cleanly",
+				)
 
 				assertExec(t, container, time.Minute, "systemctl start "+serviceName)
 				time.Sleep(5 * time.Second)
@@ -112,6 +230,71 @@ func TestCollectorPackageInstall(t *testing.T) {
 				time.Sleep(5 * time.Second)
 				require.False(t, serviceIsRunning(t, container), "service should not be running after uninstall")
 				assertExec(t, container, time.Minute, "test -f "+envPath)
+				assertExec(t, container, time.Minute, "test -f "+supervisorState+"/retained-state")
+
+				// The package matrix covers lifecycle behavior on every distro.
+				// Run the additional install.sh scenarios once to
+				// keep the per-distro integration jobs within their timeout.
+				if distro != "debian-bookworm" || arch != "amd64" {
+					return
+				}
+
+				copyFileToContainer(t, container, filepath.Join(repoRoot(t), "packaging", "installer", "install.sh"))
+				const (
+					installerServiceUser  = "installer-custom-user"
+					installerServiceGroup = "installer-custom-group"
+				)
+				installerCommand := "VERIFY_ACCESS_TOKEN=false sh /test/install.sh -- testing123 --realm test" +
+					" --collector-version /test/" + filepath.Base(pkgPath) + " --skip-collector-repo" +
+					" --service-user " + installerServiceUser + " --service-group " + installerServiceGroup
+				assertExec(t, container, time.Minute, "mkdir -p "+statePath+"/filelogs")
+				assertExec(t, container, time.Minute, "touch "+statePath+"/filelogs/retained-state")
+				assertExec(t, container, time.Minute, "chown -R root:root "+statePath)
+				assertExec(t, container, time.Minute, "chmod 0711 "+statePath)
+				assertExec(t, container, time.Minute, "chmod 0710 "+supervisorState)
+				assertExec(t, container, time.Minute, "chmod 0750 "+statePath+"/filelogs")
+				assertExec(t, container, 10*time.Minute, installerCommand+" --with-supervisor")
+				require.Equal(t, "SPLUNK_OPAMP_SUPERVISOR_ENABLED=true", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "grep '^SPLUNK_OPAMP_SUPERVISOR_ENABLED=' "+envPath,
+				)))
+				require.Eventually(t, func() bool {
+					return serviceIsRunningWithProcess(t, container, installerServiceUser, supervisorProcess)
+				}, 20*time.Second, time.Second)
+				expectedInstallerOwner := installerServiceUser + ":" + installerServiceGroup
+				require.Equal(t, expectedInstallerOwner+":711", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath,
+				)))
+				require.Equal(t, expectedInstallerOwner+":710", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+supervisorState,
+				)))
+				require.Equal(t, expectedInstallerOwner+":750", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath+"/filelogs",
+				)))
+				require.Equal(t, expectedInstallerOwner, strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G' "+statePath+"/filelogs/retained-state",
+				)))
+				assertExec(t, container, time.Minute, "test -f "+supervisorState+"/retained-state")
+
+				assertExec(t, container, 10*time.Minute, "sh /test/install.sh --uninstall")
+				assertExec(t, container, time.Minute, "test -f "+supervisorState+"/retained-state")
+				assertExec(t, container, 10*time.Minute, installerCommand)
+				rc, _, _ := exec(
+					t,
+					container,
+					time.Minute,
+					"grep -q '^SPLUNK_OPAMP_SUPERVISOR_ENABLED=' "+envPath,
+				)
+				require.NotEqual(t, 0, rc, "installer without the flag should omit supervisor enablement")
+				require.Eventually(t, func() bool {
+					return serviceIsRunningAs(t, container, installerServiceUser)
+				}, 20*time.Second, time.Second)
+				require.False(
+					t,
+					serviceIsRunningWithProcess(t, container, installerServiceUser, supervisorProcess),
+					"installer without the flag should run the Collector directly",
+				)
+				assertExec(t, container, time.Minute, "test -f "+supervisorState+"/retained-state")
+				assertExec(t, container, 10*time.Minute, "sh /test/install.sh --uninstall")
 			})
 		}
 	}
@@ -135,9 +318,33 @@ func TestCollectorPackageUpgrade(t *testing.T) {
 					return serviceIsRunning(t, container)
 				}, 20*time.Second, time.Second)
 
+				assertExec(t, container, time.Minute, "mkdir -p "+statePath+"/filelogs "+supervisorState)
+				assertExec(t, container, time.Minute, "touch "+statePath+"/filelogs/retained-state "+supervisorState+"/retained-state")
+				assertExec(t, container, time.Minute, "chown -R root:root "+statePath)
+				assertExec(t, container, time.Minute, "chmod 0711 "+statePath)
+				assertExec(t, container, time.Minute, "chmod 0750 "+statePath+"/filelogs")
+				assertExec(t, container, time.Minute, "chmod 0700 "+supervisorState)
+				assertExec(t, container, time.Minute, "chmod 0640 "+statePath+"/filelogs/retained-state")
+
 				copyFileToContainer(t, container, pkgPath)
 				upgradePackage(t, container, packageType, "/test/"+filepath.Base(pkgPath))
 
+				assertPackagedBinariesAndCapabilities(t, container)
+				require.Equal(t, serviceOwner+":"+serviceOwner+":711", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath,
+				)))
+				require.Equal(t, serviceOwner+":"+serviceOwner+":750", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath+"/filelogs",
+				)))
+				require.Equal(t, serviceOwner+":"+serviceOwner+":640", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath+"/filelogs/retained-state",
+				)))
+				require.Equal(t, serviceOwner+":"+serviceOwner+":700", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+supervisorState,
+				)))
+				require.Equal(t, serviceOwner+":"+serviceOwner, strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G' "+supervisorState+"/retained-state",
+				)))
 				require.Eventually(t, func() bool {
 					return serviceIsRunning(t, container)
 				}, 20*time.Second, time.Second)
@@ -174,6 +381,14 @@ func TestCollectorPackageUpgradeWithCustomServiceOwner(t *testing.T) {
 					return serviceIsRunningAs(t, container, customServiceUser)
 				}, 20*time.Second, time.Second)
 
+				assertExec(t, container, time.Minute, "mkdir -p "+statePath+"/filelogs "+supervisorState)
+				assertExec(t, container, time.Minute, "touch "+statePath+"/filelogs/retained-state "+supervisorState+"/retained-state")
+				assertExec(t, container, time.Minute, "chown -R root:root "+statePath)
+				assertExec(t, container, time.Minute, "chmod 0710 "+statePath)
+				assertExec(t, container, time.Minute, "chmod 0750 "+statePath+"/filelogs")
+				assertExec(t, container, time.Minute, "chmod 0700 "+supervisorState)
+				assertExec(t, container, time.Minute, "chmod 0640 "+statePath+"/filelogs/retained-state")
+
 				copyFileToContainer(t, container, pkgPath)
 				upgradePackage(t, container, packageType, "/test/"+filepath.Base(pkgPath))
 
@@ -193,6 +408,21 @@ func TestCollectorPackageUpgradeWithCustomServiceOwner(t *testing.T) {
 				)))
 				require.Equal(t, "600", strings.TrimSpace(assertExec(
 					t, container, time.Minute, "stat -c '%a' "+envPath,
+				)))
+				require.Equal(t, expectedOwner+":710", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath,
+				)))
+				require.Equal(t, expectedOwner+":750", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath+"/filelogs",
+				)))
+				require.Equal(t, expectedOwner+":640", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+statePath+"/filelogs/retained-state",
+				)))
+				require.Equal(t, expectedOwner+":700", strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G:%a' "+supervisorState,
+				)))
+				require.Equal(t, expectedOwner, strings.TrimSpace(assertExec(
+					t, container, time.Minute, "stat -c '%U:%G' "+supervisorState+"/retained-state",
 				)))
 
 				require.Eventually(t, func() bool {
@@ -422,9 +652,37 @@ func serviceIsRunning(t *testing.T, container *testutils.Container) bool {
 
 func serviceIsRunningAs(t *testing.T, container *testutils.Container, owner string) bool {
 	t.Helper()
+	return serviceIsRunningWithProcess(t, container, owner, serviceProcess)
+}
+
+func serviceIsRunningWithProcess(
+	t *testing.T,
+	container *testutils.Container,
+	owner string,
+	process string,
+) bool {
+	t.Helper()
 	systemctlCode, _, _ := exec(t, container, time.Minute, "systemctl status "+serviceName)
-	pgrepCode, _, _ := exec(t, container, time.Minute, "pgrep -a -u "+owner+" -f "+serviceProcess)
+	pgrepCode, _, _ := exec(t, container, time.Minute, "pgrep -a -u "+owner+" -f "+process)
 	return systemctlCode == 0 && pgrepCode == 0
+}
+
+func assertPackagedBinariesAndCapabilities(t *testing.T, container *testutils.Container) {
+	t.Helper()
+	expected := map[string]string{
+		"/usr/bin/otelcol":         "cap_dac_read_search,cap_sys_ptrace=eip",
+		"/usr/bin/otelcollauncher": "cap_dac_read_search=eip",
+		"/usr/bin/opampsupervisor": "cap_dac_read_search=eip",
+	}
+	for binary, capability := range expected {
+		assertExec(t, container, time.Minute, "test -x "+binary)
+		require.Equal(t, "root:root:755", strings.TrimSpace(assertExec(
+			t, container, time.Minute, "stat -c '%U:%G:%a' "+binary,
+		)))
+		require.Equal(t, binary+" "+capability, strings.TrimSpace(assertExec(
+			t, container, time.Minute, "getcap "+binary,
+		)))
+	}
 }
 
 func logJournal(t *testing.T, container *testutils.Container) {

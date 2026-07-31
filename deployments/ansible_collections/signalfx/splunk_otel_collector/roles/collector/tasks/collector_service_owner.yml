@@ -22,6 +22,14 @@
     group: "{{ splunk_service_group }}"
     mode: '0755'
 
+- name: Set Otel Collector state directory
+  ansible.builtin.file:
+    path: /var/lib/otelcol
+    state: directory
+    owner: "{{ splunk_service_user }}"
+    group: "{{ splunk_service_group }}"
+    mode: '0755'
+
 - name: Ensure systemd service directory for Splunk Otel Collector exists
   ansible.builtin.file:
     path: /etc/systemd/system/splunk-otel-collector.service.d

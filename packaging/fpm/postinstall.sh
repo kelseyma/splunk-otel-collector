@@ -21,11 +21,14 @@ if command -v setcap >/dev/null 2>&1; then
     # it.
     # See: https://man7.org/linux/man-pages/man7/capabilities.7.html
     # Note: +eip gives the capability to the program regardless of who runs it.
+    setcap CAP_DAC_READ_SEARCH=+eip /usr/bin/otelcollauncher
+    setcap CAP_DAC_READ_SEARCH=+eip /usr/bin/opampsupervisor
     setcap CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH=+eip /usr/bin/otelcol
 fi
 
 service_user="splunk-otel-collector"
 service_group="splunk-otel-collector"
+state_dir="/var/lib/otelcol"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload
@@ -43,6 +46,9 @@ fi
 if [ -d /etc/otel/collector ]; then
     chown -R "$service_user:$service_group" /etc/otel/collector
 fi
+
+mkdir -p "$state_dir"
+chown -R "$service_user:$service_group" "$state_dir"
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl enable splunk-otel-collector.service

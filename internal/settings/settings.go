@@ -295,7 +295,7 @@ func parseArgs(args []string) (*Settings, error) {
 	settings.setProperties, settings.discoveryProperties = parseSetOptionArguments(settings.setOptionArguments.value)
 
 	// Pass flags that are handled by the collector core service as raw command line arguments.
-	colCoreCommands := []string{"validate"}
+	colCoreCommands := []string{"validate", "featuregate"}
 	settings.colCoreArgs = flagSetToArgs(colCoreFlags, colCoreCommands, flagSet)
 
 	return settings, nil

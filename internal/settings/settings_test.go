@@ -181,12 +181,16 @@ func TestSplunkConfigYamlNotUtilizedInResolverURIsWithConfigEnvVar(t *testing.T)
 	require.Equal(t, []string{localGatewayConfig}, settings.ResolverURIs())
 }
 
-func TestNewSettingsWithValidate(t *testing.T) {
+func TestNewSettingsWithCoreCommands(t *testing.T) {
 	t.Cleanup(setRequiredEnvVars(t))
-	settings, err := New([]string{"validate"})
-	require.NoError(t, err)
-	require.NotNil(t, settings)
-	require.Equal(t, []string{"validate"}, settings.ColCoreArgs())
+	for _, command := range []string{"validate", "featuregate"} {
+		t.Run(command, func(t *testing.T) {
+			settings, err := New([]string{command})
+			require.NoError(t, err)
+			require.NotNil(t, settings)
+			require.Equal(t, []string{command}, settings.ColCoreArgs())
+		})
+	}
 }
 
 func TestCheckRuntimeParams_Default(t *testing.T) {

@@ -7,6 +7,7 @@ param (
     [string]$api_url = "https://api.${realm}.observability.splunkcloud.com",
     [string]$ingest_url = "https://ingest.${realm}.observability.splunkcloud.com",
     [string]$with_svc_args = "",
+    [bool]$with_supervisor = $false,
     [string]$splunk_platform_url = "",
     [string]$splunk_platform_token = "",
     [string]$splunk_platform_logs_index = ""
@@ -59,6 +60,8 @@ $program_data_collector_dir = "${env:PROGRAMDATA}\Splunk\OpenTelemetry Collector
 $program_files_collector_dir = "${Env:ProgramFiles}\Splunk\OpenTelemetry Collector"
 $default_config_path = "${program_data_collector_dir}\${mode}_config.yaml"
 $logs_config_path = "${program_data_collector_dir}\splunk_logs_config_windows.yaml"
+$supervisor_config_path = "${program_data_collector_dir}\supervisor\supervisor_config.yaml"
+$supervisor_runtime_config_path = "${program_data_collector_dir}\supervisor\supervisor_runtime_config.yaml"
 
 $expected_svc_env_vars = @{
   "SPLUNK_ACCESS_TOKEN"     = "$access_token";
@@ -72,6 +75,9 @@ $expected_svc_env_vars = @{
 if (![string]::IsNullOrWhitespace($memory)) {
     $expected_svc_env_vars["SPLUNK_MEMORY_TOTAL_MIB"] = "$memory"
 }
+if ($with_supervisor) {
+    $expected_svc_env_vars["SPLUNK_OPAMP_SUPERVISOR_ENABLED"] = "true"
+}
 
 if (![string]::IsNullOrWhitespace($splunk_platform_url)) {
     $expected_svc_env_vars["SPLUNK_PLATFORM_URL"] = "$splunk_platform_url"
@@ -84,6 +90,9 @@ if (![string]::IsNullOrWhitespace($splunk_platform_logs_index)) {
 }
 
 $actual_svc_env_vars = check_collector_svc_environment $expected_svc_env_vars
+if (!$with_supervisor -and $actual_svc_env_vars.ContainsKey("SPLUNK_OPAMP_SUPERVISOR_ENABLED")) {
+    throw "SPLUNK_OPAMP_SUPERVISOR_ENABLED should be absent when supervisor mode is not requested."
+}
 $actual_config_path = ""
 if ($actual_svc_env_vars.ContainsKey("SPLUNK_CONFIG")) {
     $actual_config_path = $actual_svc_env_vars["SPLUNK_CONFIG"]
@@ -97,6 +106,31 @@ if ((service_running -name "splunk-otel-collector")) {
     write-host "splunk-otel-collector service is running."
 } else {
     throw "splunk-otel-collector service is not running."
+}
+
+$service = Get-CimInstance -ClassName Win32_Service -Filter "Name = 'splunk-otel-collector'"
+$processes = Get-CimInstance -ClassName Win32_Process
+$launcher_process = $processes | Where-Object {
+    $_.ProcessId -eq $service.ProcessId -and $_.Name -eq "otelcollauncher.exe"
+}
+if (!$launcher_process) {
+    throw "otelcollauncher.exe is not the splunk-otel-collector service process."
+}
+
+$service_child = $processes | Where-Object { $_.ParentProcessId -eq $service.ProcessId }
+if ($with_supervisor) {
+    $supervisor_process = $service_child | Where-Object { $_.Name -eq "opampsupervisor.exe" }
+    if (!$supervisor_process) {
+        throw "opampsupervisor.exe is not running as the launcher child process."
+    }
+    $collector_process = $processes | Where-Object {
+        $_.ParentProcessId -eq $supervisor_process.ProcessId -and $_.Name -eq "otelcol.exe"
+    }
+    if (!$collector_process) {
+        throw "otelcol.exe is not running as the supervisor child process."
+    }
+} elseif (!($service_child | Where-Object { $_.Name -eq "otelcol.exe" })) {
+    throw "otelcol.exe is not running as the launcher child process."
 }
 
 $uninstallProperties = Get-ChildItem -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" |
@@ -131,6 +165,10 @@ try {
 } catch {
     throw "Failed to retrieve the service command line from the registry."
 }
+$expected_svc_executable = "`"${program_files_collector_dir}\otelcollauncher.exe`""
+if (!$svc_commandline.StartsWith($expected_svc_executable)) {
+    throw "Service executable is not the launcher. Found: '$svc_commandline', Expected to start with: '$expected_svc_executable'"
+}
 
 $expected_svc_args = $with_svc_args.Trim('"').Replace('""', '"')
 if (!$config_set_by_env -and ![string]::IsNullOrWhitespace($access_token)) {
@@ -148,5 +186,14 @@ if ($expected_svc_args -ne "") {
         throw "Service command line does not match the expected arguments. Found: '$svc_commandline', Expected to end with: '$expected_svc_args'"
     } else {
         Write-Host "Service command line matches the expected arguments."
+    }
+}
+
+if ($with_supervisor) {
+    if (!(Test-Path -Path $supervisor_config_path)) {
+        throw "Supervisor config file '$supervisor_config_path' was not found after the service started."
+    }
+    if (!(Test-Path -Path $supervisor_runtime_config_path)) {
+        throw "Supervisor runtime config file '$supervisor_runtime_config_path' was not found after the service started."
     }
 }

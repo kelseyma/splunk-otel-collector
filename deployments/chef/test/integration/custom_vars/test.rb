@@ -65,7 +65,23 @@ else
     its('content') { should match /^SPLUNK_REALM=test$/ }
     its('content') { should match /^MY_CUSTOM_VAR1=value1$/ }
     its('content') { should match /^MY_CUSTOM_VAR2=value2$/ }
+    its('content') { should match /^SPLUNK_OPAMP_SUPERVISOR_ENABLED=true$/ }
     its('content') { should match /^OTELCOL_OPTIONS=--discovery --set=processors.batch.timeout=10s$/ }
+  end
+  describe processes('opampsupervisor') do
+    its('users') { should include 'custom-user' }
+  end
+  describe file('/var/lib/otelcol') do
+    it { should be_directory }
+    its('owner') { should eq 'custom-user' }
+    its('group') { should eq 'custom-group' }
+    its('mode') { should cmp '0755' }
+  end
+  describe file('/var/lib/otelcol/supervisor') do
+    it { should be_directory }
+    its('owner') { should eq 'custom-user' }
+    its('group') { should eq 'custom-group' }
+    its('mode') { should cmp '0700' }
   end
   describe command("su -s /bin/sh -c 'test -w /etc/otel/collector' custom-user") do
     its('exit_status') { should eq 0 }

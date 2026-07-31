@@ -25,14 +25,23 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
+)
+
+const (
+	collectorProcess          = "otelcol.exe"
+	launcherProcess           = "otelcollauncher.exe"
+	supervisorEnabledProperty = "SPLUNK_OPAMP_SUPERVISOR_ENABLED"
+	supervisorProcess         = "opampsupervisor.exe"
 )
 
 // Test structure for MSI installation tests
@@ -53,6 +62,13 @@ func TestMSI(t *testing.T) {
 			name: "default",
 			collectorMSIProperties: map[string]string{
 				"SPLUNK_ACCESS_TOKEN": "fakeToken",
+			},
+		},
+		{
+			name: "supervisor-disabled",
+			collectorMSIProperties: map[string]string{
+				"SPLUNK_ACCESS_TOKEN":     "fakeToken",
+				supervisorEnabledProperty: "false",
 			},
 		},
 		{
@@ -117,6 +133,13 @@ func TestMSI(t *testing.T) {
 				"SPLUNK_PLATFORM_TOKEN":         "platformToken",
 				"SPLUNK_PLATFORM_METRICS_INDEX": "otel_metrics",
 				"SPLUNK_SETUP_COLLECTOR_MODE":   "agent",
+			},
+		},
+		{
+			name: "supervisor-enabled",
+			collectorMSIProperties: map[string]string{
+				"SPLUNK_ACCESS_TOKEN":     "fakeToken",
+				supervisorEnabledProperty: "true",
 			},
 		},
 	}
@@ -385,6 +408,19 @@ func runMsiTest(t *testing.T, test msiTest, msiInstallerPath string) {
 			errUninstallCmd := uninstallCmd.Run()
 			t.Logf("Uninstall command: %s", uninstallCmd.SysProcAttr.CmdLine)
 			require.NoError(t, errUninstallCmd, "Failed to uninstall the MSI: %v", errUninstallCmd)
+
+			programFilesDir := os.Getenv("PROGRAMFILES")
+			require.NotEmpty(t, programFilesDir, "PROGRAMFILES environment variable is not set")
+			installDir := filepath.Join(programFilesDir, "Splunk", "OpenTelemetry Collector")
+			assert.NoFileExists(t, filepath.Join(installDir, launcherProcess))
+			assert.NoFileExists(t, filepath.Join(installDir, collectorProcess))
+			assert.NoFileExists(t, filepath.Join(installDir, supervisorProcess))
+
+			if test.collectorMSIProperties[supervisorEnabledProperty] == "true" {
+				supervisorDir := supervisorDataDir(t)
+				assert.FileExists(t, filepath.Join(supervisorDir, "supervisor_config.yaml"))
+				assert.FileExists(t, filepath.Join(supervisorDir, "retained-state"))
+			}
 		}()
 	}
 
@@ -402,14 +438,7 @@ func runMsiTest(t *testing.T, test msiTest, msiInstallerPath string) {
 	}
 	if !test.skipSvcStop {
 		defer func() {
-			_, err = service.Control(svc.Stop)
-			require.NoError(t, err)
-
-			require.Eventually(t, func() bool {
-				status, err := service.Query()
-				require.NoError(t, err)
-				return status.State == svc.Stopped
-			}, 10*time.Second, 500*time.Millisecond, "Failed to stop the service")
+			stopService(t, service)
 		}()
 	}
 
@@ -424,6 +453,11 @@ func runMsiTest(t *testing.T, test msiTest, msiInstallerPath string) {
 	require.NoError(t, err, "Failed to get service configuration")
 
 	assertServiceConfiguration(t, test.collectorMSIProperties, svcConfig)
+	assertProcessMode(t, service, test.collectorMSIProperties[supervisorEnabledProperty] == "true")
+
+	if test.collectorMSIProperties[supervisorEnabledProperty] == "true" {
+		assertSupervisorLifecycle(t, service)
+	}
 }
 
 func startServiceIfStopped(t *testing.T, service *mgr.Service) {
@@ -435,6 +469,148 @@ func startServiceIfStopped(t *testing.T, service *mgr.Service) {
 
 	err = service.Start()
 	require.NoError(t, err)
+}
+
+func stopService(t *testing.T, service *mgr.Service) {
+	t.Helper()
+
+	status, err := service.Query()
+	require.NoError(t, err)
+	if status.State == svc.Stopped {
+		return
+	}
+
+	_, err = service.Control(svc.Stop)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		status, queryErr := service.Query()
+		require.NoError(t, queryErr)
+		return status.State == svc.Stopped
+	}, 40*time.Second, 500*time.Millisecond, "Failed to stop the service")
+}
+
+func assertProcessMode(t *testing.T, service *mgr.Service, supervisorEnabled bool) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		processNames, _ := serviceProcessTree(t, service)
+		return processNames[launcherProcess] &&
+			processNames[collectorProcess] &&
+			processNames[supervisorProcess] == supervisorEnabled
+	}, 20*time.Second, 500*time.Millisecond, "Unexpected collector service process tree")
+}
+
+func assertSupervisorLifecycle(t *testing.T, service *mgr.Service) {
+	t.Helper()
+
+	supervisorDir := supervisorDataDir(t)
+	supervisorConfig := filepath.Join(supervisorDir, "supervisor_config.yaml")
+	runtimeConfig := filepath.Join(supervisorDir, "supervisor_runtime_config.yaml")
+	require.FileExists(t, supervisorConfig)
+	require.FileExists(t, runtimeConfig)
+	managedConfigs, err := filepath.Glob(filepath.Join(supervisorDir, "managed_collector_*.yaml"))
+	require.NoError(t, err)
+	require.NotEmpty(t, managedConfigs, "Managed collector configuration was not created")
+
+	sourceConfig, err := os.ReadFile(supervisorConfig)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(supervisorDir, "retained-state"), []byte("retain"), 0o600))
+
+	_, processIDs := serviceProcessTree(t, service)
+	stopService(t, service)
+	require.Eventually(t, func() bool {
+		for _, processID := range processIDs {
+			if processIsRunning(processID) {
+				return false
+			}
+		}
+		return true
+	}, 20*time.Second, 500*time.Millisecond, "Collector service processes remained after stop")
+
+	require.NoError(t, service.Start())
+	require.Eventually(t, func() bool {
+		status, queryErr := service.Query()
+		require.NoError(t, queryErr)
+		return status.State == svc.Running
+	}, 10*time.Second, 500*time.Millisecond, "Failed to restart the service")
+	assertProcessMode(t, service, true)
+
+	restartedSourceConfig, err := os.ReadFile(supervisorConfig)
+	require.NoError(t, err)
+	assert.Equal(t, sourceConfig, restartedSourceConfig)
+	assert.FileExists(t, filepath.Join(supervisorDir, "retained-state"))
+}
+
+type processEntry struct {
+	id       uint32
+	parentID uint32
+	name     string
+}
+
+func serviceProcessTree(t *testing.T, service *mgr.Service) (map[string]bool, []uint32) {
+	t.Helper()
+
+	status, err := service.Query()
+	require.NoError(t, err)
+	if status.ProcessId == 0 {
+		return map[string]bool{}, nil
+	}
+
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	require.NoError(t, err)
+	defer windows.CloseHandle(snapshot)
+
+	var entries []processEntry
+	var entry windows.ProcessEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+	err = windows.Process32First(snapshot, &entry)
+	for err == nil {
+		entries = append(entries, processEntry{
+			id:       entry.ProcessID,
+			parentID: entry.ParentProcessID,
+			name:     strings.ToLower(windows.UTF16ToString(entry.ExeFile[:])),
+		})
+		err = windows.Process32Next(snapshot, &entry)
+	}
+	require.ErrorIs(t, err, windows.ERROR_NO_MORE_FILES)
+
+	descendants := map[uint32]bool{status.ProcessId: true}
+	for changed := true; changed; {
+		changed = false
+		for _, process := range entries {
+			if descendants[process.parentID] && !descendants[process.id] {
+				descendants[process.id] = true
+				changed = true
+			}
+		}
+	}
+
+	names := make(map[string]bool)
+	ids := make([]uint32, 0, len(descendants))
+	for _, process := range entries {
+		if descendants[process.id] {
+			names[process.name] = true
+			ids = append(ids, process.id)
+		}
+	}
+	return names, ids
+}
+
+func processIsRunning(processID uint32) bool {
+	process, err := windows.OpenProcess(windows.SYNCHRONIZE, false, processID)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(process)
+	event, err := windows.WaitForSingleObject(process, 0)
+	return err == nil && event == uint32(windows.WAIT_TIMEOUT)
+}
+
+func supervisorDataDir(t *testing.T) string {
+	t.Helper()
+	programDataDir := os.Getenv("PROGRAMDATA")
+	require.NotEmpty(t, programDataDir, "PROGRAMDATA environment variable is not set")
+	return filepath.Join(programDataDir, "Splunk", "OpenTelemetry Collector", "supervisor")
 }
 
 func runMsiInstallFailureTest(t *testing.T, test msiTest, msiInstallerPath, expectedLogMessage string) {
@@ -473,6 +649,10 @@ func assertServiceConfiguration(t *testing.T, msiProperties map[string]string, s
 	require.NotEmpty(t, programDataDir, "PROGRAMDATA environment variable is not set")
 	programFilesDir := os.Getenv("PROGRAMFILES")
 	require.NotEmpty(t, programFilesDir, "PROGRAMFILES environment variable is not set")
+	installDir := filepath.Join(programFilesDir, "Splunk", "OpenTelemetry Collector")
+	assert.FileExists(t, filepath.Join(installDir, launcherProcess))
+	assert.FileExists(t, filepath.Join(installDir, collectorProcess))
+	assert.FileExists(t, filepath.Join(installDir, supervisorProcess))
 
 	installRealm := optionalInstallPropertyOrDefault(msiProperties, "SPLUNK_REALM", "us0")
 	ingestURL := optionalInstallPropertyOrDefault(msiProperties, "SPLUNK_INGEST_URL", "https://ingest."+installRealm+".observability.splunkcloud.com")
@@ -517,6 +697,7 @@ func assertServiceConfiguration(t *testing.T, msiProperties map[string]string, s
 		"SPLUNK_PLATFORM_TOKEN",
 		"SPLUNK_PLATFORM_LOGS_INDEX",
 		"SPLUNK_PLATFORM_METRICS_INDEX",
+		supervisorEnabledProperty,
 	} {
 		if value, ok := msiProperties[key]; ok {
 			expectedEnvVars[key] = value
@@ -639,7 +820,7 @@ func expectedServiceCommand(t *testing.T, collectorServiceArgs string) string {
 	require.NotEmpty(t, programFilesDir, "PROGRAMFILES environment variable is not set")
 
 	collectorDir := filepath.Join(programFilesDir, "Splunk", "OpenTelemetry Collector")
-	collectorExe := filepath.Join(collectorDir, "otelcol") + ".exe"
+	collectorExe := filepath.Join(collectorDir, launcherProcess)
 
 	if collectorServiceArgs == "" {
 		return quotedIfRequired(collectorExe)

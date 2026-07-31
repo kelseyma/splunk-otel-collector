@@ -65,6 +65,7 @@ func TestUpgradeAndUninstallFromNonMachineWideVersion(t *testing.T) {
 	installCollector(t, getFilePathFromEnvVar(t, "INSTALL_SCRIPT_PATH"), "", msiInstallerPath)
 	verifyServiceExists(t, scm)
 	verifyServiceState(t, scm, svc.Running)
+	verifyLauncherService(t, scm)
 	verifyZeroConfigResourceAttributes(t, 1, "deployment.environment.name=test")
 	latestSvcVersion := getCurrentServiceVersion(t)
 	require.NotEqual(t, oldCollectorVersion, latestSvcVersion)
@@ -138,6 +139,34 @@ func verifyServiceState(t *testing.T, scm *mgr.Mgr, desiredState svc.State) {
 		require.NoError(t, err)
 		return status.State == desiredState
 	}, 10*time.Second, 500*time.Millisecond, "Service failed to reach the desired state")
+}
+
+func verifyLauncherService(t *testing.T, scm *mgr.Mgr) {
+	t.Helper()
+
+	service, err := scm.OpenService(serviceName)
+	require.NoError(t, err)
+	defer service.Close()
+
+	config, err := service.Config()
+	require.NoError(t, err)
+
+	installDir := filepath.Join(os.Getenv("PROGRAMFILES"), "Splunk", "OpenTelemetry Collector")
+	launcherPath := filepath.Join(installDir, "otelcollauncher.exe")
+	require.Contains(t, strings.ToLower(config.BinaryPathName), strings.ToLower(launcherPath))
+	configPath := filepath.Join(os.Getenv("PROGRAMDATA"), "Splunk", "OpenTelemetry Collector", "agent_config.yaml")
+	require.Contains(t, strings.ToLower(config.BinaryPathName), strings.ToLower(`--config "`+configPath+`"`))
+	require.FileExists(t, launcherPath)
+	require.FileExists(t, filepath.Join(installDir, "otelcol.exe"))
+	require.FileExists(t, filepath.Join(installDir, "opampsupervisor.exe"))
+	require.FileExists(t, configPath)
+
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services\`+serviceName, registry.QUERY_VALUE)
+	require.NoError(t, err)
+	defer key.Close()
+	environment, _, err := key.GetStringsValue("Environment")
+	require.NoError(t, err)
+	require.Contains(t, environment, "SPLUNK_ACCESS_TOKEN=fake-token")
 }
 
 func getCurrentServiceVersion(t *testing.T) string {

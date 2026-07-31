@@ -202,7 +202,11 @@ class {{ splunk_otel_collector:
     splunk_listen_interface => '0.0.0.0',
     collector_version => '$version',
     collector_command_line_args => '--discovery --set=processors.batch.timeout=10s',
-    collector_additional_env_vars => {{ 'MY_CUSTOM_VAR1' => 'value1', 'MY_CUSTOM_VAR2' => 'value2' }},
+    collector_additional_env_vars => {{
+      'MY_CUSTOM_VAR1' => 'value1',
+      'MY_CUSTOM_VAR2' => 'value2',
+      'SPLUNK_OPAMP_SUPERVISOR_ENABLED' => 'true',
+    }},
     service_user => '{CUSTOM_SERVICE_OWNER}',
     service_group => '{CUSTOM_SERVICE_GROUP}',
 }}
@@ -240,10 +244,22 @@ def test_puppet_with_custom_vars(distro, puppet_release):
             verify_config_file(container, SPLUNK_ENV_PATH, "OTELCOL_OPTIONS", "--discovery --set=processors.batch.timeout=10s")
             verify_config_file(container, SPLUNK_ENV_PATH, "MY_CUSTOM_VAR1", "value1")
             verify_config_file(container, SPLUNK_ENV_PATH, "MY_CUSTOM_VAR2", "value2")
+            verify_config_file(container, SPLUNK_ENV_PATH, "SPLUNK_OPAMP_SUPERVISOR_ENABLED", "true")
             assert wait_for(lambda: service_is_running(container, service_owner=CUSTOM_SERVICE_OWNER))
+            assert wait_for(lambda: service_is_running(
+                container,
+                service_owner=CUSTOM_SERVICE_OWNER,
+                process="/usr/bin/opampsupervisor",
+            ))
             code, output = container.exec_run(f"stat -c '%U:%G:%a' {CONFIG_DIR}")
             assert code == 0
             assert output.decode("utf-8").strip() == f"{CUSTOM_SERVICE_OWNER}:{CUSTOM_SERVICE_GROUP}:755"
+            code, output = container.exec_run("stat -c '%U:%G:%a' /var/lib/otelcol")
+            assert code == 0
+            assert output.decode("utf-8").strip() == f"{CUSTOM_SERVICE_OWNER}:{CUSTOM_SERVICE_GROUP}:755"
+            code, output = container.exec_run("stat -c '%U:%G:%a' /var/lib/otelcol/supervisor")
+            assert code == 0
+            assert output.decode("utf-8").strip() == f"{CUSTOM_SERVICE_OWNER}:{CUSTOM_SERVICE_GROUP}:700"
             assert container.exec_run(
                 f"su -s /bin/sh -c 'test -w {CONFIG_DIR}' {CUSTOM_SERVICE_OWNER}"
             ).exit_code == 0
