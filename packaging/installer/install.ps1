@@ -121,9 +121,9 @@
    .EXAMPLE
     .\install.ps1 -preserve_prev_default_config $true
 .PARAMETER with_supervisor
-    (OPTIONAL) Enable OpAMP Supervisor mode for the Splunk OpenTelemetry Collector (default: false).
+    (OPTIONAL) Whether to enable OpAMP Supervisor mode for the Splunk OpenTelemetry Collector (default: $false).
     .EXAMPLE
-    .\install.ps1 -access_token "ACCESSTOKEN" -with_supervisor
+    .\install.ps1 -access_token "ACCESSTOKEN" -with_supervisor $true
 .PARAMETER uninstall_collector
     (OPTIONAL) Uninstalls the Splunk OpenTelemetry Collector if it is already installed and then exits the script.
     .EXAMPLE
@@ -141,7 +141,7 @@ param(
     [string]$realm = "us0",
     [string]$memory = "512",
     [ValidateSet('agent', 'gateway')][string]$mode = "agent",
-    [switch]$with_supervisor,
+    [bool]$with_supervisor = $false,
     [string]$network_interface = "",
     [string]$ingest_url = "",
     [string]$api_url = "",
