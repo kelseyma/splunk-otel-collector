@@ -65,6 +65,14 @@ func TestUpgradeAndUninstallFromNonMachineWideVersion(t *testing.T) {
 	installCollector(t, getFilePathFromEnvVar(t, "INSTALL_SCRIPT_PATH"), "", msiInstallerPath)
 	verifyServiceExists(t, scm)
 	verifyServiceState(t, scm, svc.Running)
+
+	service, err := scm.OpenService(serviceName)
+	require.NoError(t, err)
+	serviceConfig, err := service.Config()
+	require.NoError(t, err)
+	require.Contains(t, strings.ToLower(serviceConfig.BinaryPathName), "otelcollauncher.exe")
+	require.NoError(t, service.Close())
+
 	verifyZeroConfigResourceAttributes(t, 1, "deployment.environment.name=test")
 	latestSvcVersion := getCurrentServiceVersion(t)
 	require.NotEqual(t, oldCollectorVersion, latestSvcVersion)
